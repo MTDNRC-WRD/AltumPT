@@ -1,0 +1,30 @@
+[paths]
+project_root = "C:/Users/CND367/Documents/MicaSense/Gold_Creek"
+exiftool = "C:/exiftool/exiftool.exe"
+
+[dates.20260430]
+raw_root = "C:/Users/CND367/Documents/MicaSense/Gold_Creek/20260430/0000SET"
+imagery_root = "C:/Users/CND367/Documents/MicaSense/Gold_Creek/20260430/Imagery"
+
+[options]
+combine_imagery = true
+separate_thermal = true
+run_exclusions = true
+
+[exclusions]
+calibration_panel_ids = [0, 1, 2, 1399]
+exclude_ranges = [
+    [0, 54],
+    [627, 651],
+    [1218, 1252],
+    [1374, 1399]
+]
+
+[naming]
+# Regex for input images (raw/multispectral)
+source_pattern = "^IMG_(\\d+)_(\\d+)\\.tif$"
+# Pattern for reflectance outputs.
+# Use Python format fields {capture_id} and {band_id}.
+reflectance_pattern = "ref_IMG_{capture_id}_{band_id}.tif"
+# Band used for quick QA plotting
+qa_band_to_plot = 1

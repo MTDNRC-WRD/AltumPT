@@ -1,17 +1,31 @@
+from __future__ import annotations
+
 from pathlib import Path
 import re
 import subprocess
 import json
+
 from tqdm import tqdm
 import matplotlib.pyplot as plt
 
-IMAGE_FOLDER = Path(r"C:\Users\CND367\Documents\MicaSense\Gold_Creek\20260430\Imagery\multispectral")
-EXIFTOOL_PATH = r"C:\Users\CND367\Documents\python_scripts\exiftool\exiftool.exe"
-BAND_TO_PLOT = 1
+from config_loader import load_config, date_config
+
+DATE_KEY = "20260430"  # change per flight/date as needed
+
+cfg = load_config()
+date_cfg = date_config(cfg, DATE_KEY)
+naming_cfg = cfg["naming"]
+
+IMAGERY_ROOT = Path(date_cfg["imagery_root"])
+IMAGE_FOLDER = IMAGERY_ROOT / "multispectral"
+
+EXIFTOOL_PATH = Path(cfg["paths"]["exiftool"])
+BAND_TO_PLOT = naming_cfg["band_to_plot"]
 POINT_SIZE = 18
 CMAP = "viridis"
 
-FILENAME_RE = re.compile(r"^IMG_(\d+)_(\d+)\.tif$", re.IGNORECASE)
+SOURCE_PATTERN = naming_cfg["source_pattern"]
+FILENAME_RE = re.compile(SOURCE_PATTERN, re.IGNORECASE)
 
 
 def get_exiftool_metadata(image_path: Path) -> dict:
