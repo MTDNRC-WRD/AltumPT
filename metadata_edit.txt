@@ -1,0 +1,57 @@
+paste the following in the micasense/metadata.py file
+
+def __init__(self, filename: str, exiftool_path=None, exiftool_obj=None):
+    if exiftool_obj is not None:
+        self.exif = exiftool_obj.get_metadata(filename)
+        return
+
+    # 1) Decide exiftoolPath, preferring explicit argument
+    if exiftool_path is not None:
+        self.exiftoolPath = exiftool_path
+    elif os.environ.get('exiftoolpath') is not None:
+        self.exiftoolPath = os.path.normpath(os.environ.get('exiftoolpath'))
+    else:
+        # Hard-wire your absolute path here instead of None
+        self.exiftoolPath = r"C:\Users\CND367\Documents\python_scripts\exiftool\exiftool.exe"
+
+    if not os.path.isfile(filename):
+        raise IOError("Input path is not a file")
+
+    # 2) Actually use the path when creating ExifToolHelper
+    with exiftool.ExifToolHelper(executable=self.exiftoolPath) as exift:
+        self.exif = exift.get_metadata(filename)
+
+
+
+
+
+paste the following in the micasense/imageset.py file
+
+ @classmethod
+    def from_directory(cls, directory, progress_callback=None, exiftool_path=None, allow_uncalibrated=False):
+        """
+        Create an ImageSet recursively from the files in a directory
+        """
+        cls.basedir = directory
+        matches = []
+        for root, dirnames, filenames in os.walk(directory):
+            for filename in fnmatch.filter(filenames, '*.tif'):
+                matches.append(os.path.join(root, filename))
+
+        images = []
+
+        # Decide which exiftool executable to use
+        if exiftool_path is None and os.environ.get('exiftoolpath') is not None:
+            exiftool_exe = os.path.normpath(os.environ.get('exiftoolpath'))
+        elif exiftool_path is None:
+            # Fall back to your hard-coded absolute path
+            exiftool_exe = EXIFTOOL_ABS_PATH
+        else:
+            exiftool_exe = exiftool_path
+
+        # Use explicit executable kwarg so ExifToolHelper does not guess
+        with exiftool.ExifToolHelper(executable=exiftool_exe) as exift:
+            for i, path in enumerate(matches):
+                images.append(image.Image(path, exiftool_obj=exift, allow_uncalibrated=allow_uncalibrated))
+                if progress_callback is not None:
+                    progress_callback(float(i) / float(len(matches)))

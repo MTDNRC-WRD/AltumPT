@@ -20,7 +20,7 @@ IMAGERY_ROOT = Path(date_cfg["imagery_root"])
 IMAGE_FOLDER = IMAGERY_ROOT / "multispectral"
 
 EXIFTOOL_PATH = Path(cfg["paths"]["exiftool"])
-BAND_TO_PLOT = naming_cfg["band_to_plot"]
+BAND_TO_PLOT = naming_cfg["qa_band_to_plot"]
 POINT_SIZE = 18
 CMAP = "viridis"
 

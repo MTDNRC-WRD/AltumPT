@@ -1,6 +1,6 @@
 [paths]
 project_root = "C:/Users/CND367/Documents/MicaSense/Gold_Creek"
-exiftool = "C:/exiftool/exiftool.exe"
+exiftool = "C:/Users/CND367/Documents/python_scripts/exiftool/exiftool.exe"
 
 [dates.20260430]
 raw_root = "C:/Users/CND367/Documents/MicaSense/Gold_Creek/20260430/0000SET"

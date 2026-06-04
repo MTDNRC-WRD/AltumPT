@@ -6,6 +6,7 @@ import re
 import subprocess
 
 import numpy as np
+from tqdm import tqdm
 
 from micasense import imageset, imageutils, panel
 
@@ -74,9 +75,6 @@ def copy_metadata(src: Path, dst: Path):
 # ----- Panel handling -----
 
 def load_panel_captures(panel_dir: Path):
-    """
-    Load all panel captures from cal_panels as (capture, panel_obj) pairs.
-    """
     if not panel_dir.exists():
         raise FileNotFoundError(f"Panel directory does not exist: {panel_dir}")
 
@@ -85,26 +83,66 @@ def load_panel_captures(panel_dir: Path):
 
     print(f"Found {len(captures)} panel captures in {panel_dir}")
 
-    panel_list: list[tuple[imageset.Capture, panel.Panel]] = []
+    panel_list = []
     for cap in captures:
-        p = panel.Panel(cap)
+        # Use one representative image per capture (e.g., first band)
+        img = cap.images[0]
+        p = panel.Panel(img)
         panel_list.append((cap, p))
     return panel_list
 
 
 def compute_k_for_panel(p: panel.Panel) -> dict[str, float]:
     """
-    Compute per-band radiance->reflectance factors k_b for a single panel.
-    k_b = panel_reflectance_b / panel_mean_radiance_b
+    Compute radiance->reflectance factor k_b for the band of this Panel's image.
+    Returns a dict with a single entry {band_name: k_b}.
     """
-    refl = p.reflectance_by_band()
-    rad = p.radiance_by_band()
+    rad_mean, _, _, _ = p.radiance()
 
+    rho = p.reflectance_from_panel_serial()
+    if rho is None:
+        raise ValueError("Panel reflectance could not be determined from serial.")
+
+    band_name = p.image.band_name
+    k_b = rho / rad_mean
+
+    return {band_name: k_b}
+
+
+def compute_k_for_capture(cap) -> dict[str, float]:
+    """
+    Compute k_b for all usable bands in a single panel capture.
+    Skips thermal/LWIR and any band where a panel cannot be detected
+    or reflectance is unavailable.
+    Returns {band_name: k_b}.
+    """
     k: dict[str, float] = {}
-    for band_name in refl.keys():
-        rad_val = rad[band_name]
-        if rad_val != 0:
-            k[band_name] = refl[band_name] / rad_val
+    for img in cap.images:
+        if img.band_name.upper() == "LWIR" or img.band_index == THERMAL_BAND_ID:
+            continue
+
+        p = panel.Panel(img)
+
+        if not p.panel_detected():
+            print(f"Panel not detected for band {img.band_name}, skipping in this capture")
+            continue
+
+        try:
+            rad_mean, _, _, _ = p.radiance()
+        except Exception as e:
+            print(f"Failed to compute radiance for band {img.band_name}: {e}, skipping")
+            continue
+
+        rho = p.reflectance_from_panel_serial()
+        if rho is None:
+            print(f"No reflectance from serial for band {img.band_name}, skipping")
+            continue
+
+        k[img.band_name] = rho / rad_mean
+
+    if not k:
+        raise RuntimeError("No bands produced calibration factors for this panel capture.")
+
     return k
 
 
@@ -117,20 +155,17 @@ def build_time_interpolator(panel_list):
     if not panel_list:
         raise RuntimeError("No panel captures available for calibration.")
 
-    # Build sorted list of (timestamp, k_dict)
     entries: list[tuple[datetime, dict[str, float]]] = []
-    for cap, p in panel_list:
-        t = cap.center_time
+    for cap, _ in panel_list:
+        t = cap.utc_time()
         if not isinstance(t, datetime):
-            # Convert if needed, but typically center_time is already datetime
             t = datetime.fromisoformat(str(t))
-        k = compute_k_for_panel(p)
+        k = compute_k_for_capture(cap)
         entries.append((t, k))
 
     entries.sort(key=lambda x: x[0])
 
     if len(entries) == 1:
-        # Single panel: constant k_dict
         single_k = entries[0][1]
 
         def k_func(_time: datetime) -> dict[str, float]:
@@ -139,31 +174,24 @@ def build_time_interpolator(panel_list):
         print("Using single panel calibration for all times.")
         return k_func
 
-    # Multiple panels: linear interpolation in time
     times = [e[0] for e in entries]
     k_dicts = [e[1] for e in entries]
-
     band_names = list(k_dicts[0].keys())
 
     def k_func(time: datetime) -> dict[str, float]:
-        # Before first panel: use first
         if time <= times[0]:
             return k_dicts[0]
-        # After last panel: use last
         if time >= times[-1]:
             return k_dicts[-1]
 
-        # Find panel times bracketing 'time'
         for i in range(len(times) - 1):
-            t0 = times[0 + i]
-            t1 = times[1 + i]
+            t0 = times[i]
+            t1 = times[i + 1]
             if t0 <= time <= t1:
-                k0 = k_dicts[0 + i]
-                k1 = k_dicts[1 + i]
-                # Fraction of time between t0 and t1
+                k0 = k_dicts[i]
+                k1 = k_dicts[i + 1]
                 total = (t1 - t0).total_seconds()
                 alpha = (time - t0).total_seconds() / total if total > 0 else 0.0
-                # Interpolate each band
                 k_interp: dict[str, float] = {}
                 for b in band_names:
                     v0 = k0[b]
@@ -171,7 +199,6 @@ def build_time_interpolator(panel_list):
                     k_interp[b] = (1 - alpha) * v0 + alpha * v1
                 return k_interp
 
-        # Fallback (should not be reached)
         return k_dicts[-1]
 
     print(f"Using time-varying calibration from {len(entries)} panel captures.")
@@ -192,32 +219,32 @@ def load_multispectral_images(ms_dir: Path):
     return imgset
 
 
+import imageio.v3 as iio  # put this with your imports at the top
+
 def process_capture_to_reflectance(cap, get_k_for_time):
     """
     Convert all non-thermal bands for a single capture to reflectance and write
     ref_IMG_<capture>_<band>.tif to reflectance_folder, copying metadata from original.
     """
-    capture_time = cap.center_time
+    capture_time = cap.utc_time()
     k_dict = get_k_for_time(capture_time)
 
     for img in cap.images:
-        # Skip thermal band here; you might handle it separately
-        if img.band_name.lower() == "thermal" or img.band_index == THERMAL_BAND_ID:
+        # Skip thermal / LWIR band
+        if img.band_name.upper() == "LWIR" or img.band_index == THERMAL_BAND_ID:
             continue
 
-        # Convert raw DN to radiance
-        rad = imageutils.raw_image_to_radiance(img)
+        # DN -> radiance
+        rad = img.radiance()
 
-        # Determine band key used in k_dict
         band_name = img.band_name
         if band_name not in k_dict:
-            # Some setups use band_index as key; adjust if needed
-            raise KeyError(f"Band {band_name} not found in calibration factors.")
+            print(f"No calibration factor for band {band_name} at time {capture_time}, skipping")
+            continue
 
         factor = k_dict[band_name]
-        refl = rad * factor  # reflectance
+        refl = rad * factor  # reflectance array
 
-        # Build output filename based on capture_id and band_id from original
         src_path = Path(img.path)
         parsed = parse_capture_band(src_path)
         if parsed is None:
@@ -227,8 +254,9 @@ def process_capture_to_reflectance(cap, get_k_for_time):
         out_path = make_reflectance_path(capture_id, band_id)
         out_path.parent.mkdir(parents=True, exist_ok=True)
 
-        # Save as float32 GeoTIFF; you can adjust dtype or scaling as needed
-        imageutils.save_image(out_path, refl.astype(np.float32), img, dtype=np.float32)
+        # Write reflectance as float32 GeoTIFF (no metadata yet)
+        # imageio will create a simple single-band TIFF; copy_metadata will add EXIF/XMP afterwards.
+        iio.imwrite(out_path, refl.astype(np.float32), extension=".tif")
 
         # Copy EXIF/XMP from original
         copy_metadata(src_path, out_path)
@@ -238,3 +266,36 @@ def main():
     print(f"Using config date key: {DATE_KEY}")
     print(f"Imagery root: {IMAGERY_ROOT}")
     print(f"Panel folder: {cal_panel_folder}")
+    print(f"Multispectral folder: {multispectral_folder}")
+    print(f"Reflectance folder: {reflectance_folder}")
+    print(f"Exiftool path: {EXIFTOOL_PATH}")
+
+    reflectance_folder.mkdir(parents=True, exist_ok=True)
+
+    # 1) Load panels and build time->k interpolator
+    panel_list = load_panel_captures(cal_panel_folder)
+    k_func = build_time_interpolator(panel_list)
+
+    # Panel summary (just shows the band of the representative image)
+    print("\nPanel calibration summary:")
+    for cap, p in panel_list:
+        t = cap.utc_time()
+        t_str = t.isoformat() if isinstance(t, datetime) else str(t)
+        k = compute_k_for_panel(p)
+        print(f"  Panel at {t_str}:")
+        for band_name, factor in k.items():
+            print(f"    {band_name}: k = {factor:.6f}")
+
+    # 2) Load flight captures
+    imgset = load_multispectral_images(multispectral_folder)
+
+    # 3) Process each capture to reflectance with progress bar
+    for cap in tqdm(imgset.captures, desc="Processing captures", unit="capture"):
+        process_capture_to_reflectance(cap, k_func)
+
+    print("\nDone. Reflectance images written to:")
+    print(reflectance_folder)
+
+
+if __name__ == "__main__":
+    main()

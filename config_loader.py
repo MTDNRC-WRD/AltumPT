@@ -1,6 +1,9 @@
 from __future__ import annotations
 from pathlib import Path
-import tomllib  # Python 3.11+
+try:
+    import tomllib  # type: ignore[attr-defined]
+except ModuleNotFoundError:
+    import tomli as tomllib  # pip install tomli
 
 PROJECT_CONFIG = Path(r"config.toml")
 
