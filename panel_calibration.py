@@ -4,7 +4,7 @@ from pathlib import Path
 from datetime import datetime
 import re
 import subprocess
-
+import gc
 import numpy as np
 from tqdm import tqdm
 
@@ -19,6 +19,13 @@ DATE_KEY = "20260430"  # change per flight/date as needed
 cfg = load_config()
 date_cfg = date_config(cfg, DATE_KEY)
 naming_cfg = cfg["naming"]
+range_cfg = cfg.get("range", {})
+
+RANGE_ENABLED = range_cfg.get("enabled", False)
+RANGE_START = int(range_cfg.get("start", 0))
+RANGE_END = range_cfg.get("end", None)
+if RANGE_END is not None:
+    RANGE_END = int(RANGE_END)
 
 IMAGERY_ROOT = Path(date_cfg["imagery_root"])
 multispectral_folder = IMAGERY_ROOT / "multispectral"
@@ -257,7 +264,8 @@ def process_capture_to_reflectance(cap, get_k_for_time):
         # Write reflectance as float32 GeoTIFF (no metadata yet)
         # imageio will create a simple single-band TIFF; copy_metadata will add EXIF/XMP afterwards.
         iio.imwrite(out_path, refl.astype(np.float32), extension=".tif")
-
+        copy_metadata(src_path, out_path)
+        del rad, refl
         # Copy EXIF/XMP from original
         copy_metadata(src_path, out_path)
 
@@ -286,15 +294,11 @@ def main():
         for band_name, factor in k.items():
             print(f"    {band_name}: k = {factor:.6f}")
 
-    # 2) Load flight captures
-    imgset = load_multispectral_images(multispectral_folder)
-
-    # 3) Process each capture to reflectance with progress bar
-    for cap in tqdm(imgset.captures, desc="Processing captures", unit="capture"):
-        process_capture_to_reflectance(cap, k_func)
-
-    print("\nDone. Reflectance images written to:")
-    print(reflectance_folder)
+    RANGE_ENABLED = range_cfg.get("enabled", False)
+    RANGE_START = int(range_cfg.get("start", 0))
+    RANGE_END = range_cfg.get("end", None)
+    if RANGE_END is not None:
+        RANGE_END = int(RANGE_END)
 
 
 if __name__ == "__main__":

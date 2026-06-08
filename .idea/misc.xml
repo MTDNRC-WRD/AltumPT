@@ -3,5 +3,5 @@
   <component name="Black">
     <option name="sdkName" value="altumpt" />
   </component>
-  <component name="ProjectRootManager" version="2" project-jdk-name="altumpt" project-jdk-type="Python SDK" />
+  <component name="ProjectRootManager" version="2" project-jdk-name="micasense" project-jdk-type="Python SDK" />
 </project>
