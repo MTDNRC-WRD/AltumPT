@@ -8,8 +8,11 @@ excluded capture ranges.
 The workflow is:
 
 1. Create the destination folder structure.
-2. Move source imagery into multispectral and/or thermal folders.
-3. Optionally move calibration panel and excluded captures into dedicated
+2. Move source imagery into the multispectral folder.
+3. When combining imagery from multiple SET folders, renumber later SETs so
+   capture IDs form one continuous sequence with no filename collisions.
+4. Optionally separate thermal imagery into a dedicated folder.
+5. Optionally move calibration panel and excluded captures into dedicated
    folders.
 
 The script expects filenames that match the configured regular expression
@@ -49,6 +52,7 @@ exclusion_folder = NEW_FOLDER / "exclusions"
 
 SOURCE_PATTERN: str = naming_cfg["source_pattern"]
 FILENAME_RE = re.compile(SOURCE_PATTERN, re.IGNORECASE)
+SET_FOLDER_RE = re.compile(r"^(\d+)SET$", re.IGNORECASE)
 
 THERMAL_BAND_ID = 7
 
@@ -107,24 +111,46 @@ def parse_filename(file_path: Path) -> tuple[int, int] | None:
     return capture_id, band_id
 
 
-def move_file_safely(file_path: Path, destination_folder: Path) -> str:
+def format_output_name(file_path: Path, capture_id: int, band_id: int) -> str:
+    """Create an output filename preserving the original extension.
+
+    Args:
+        file_path: Original source file path.
+        capture_id: Capture ID to write into the destination filename.
+        band_id: Band ID to write into the destination filename.
+
+    Returns:
+        A renamed output filename using the adjusted capture ID and original
+        file extension.
+    """
+    return f"IMG_{capture_id}_{band_id}{file_path.suffix}"
+
+
+def move_file_safely(
+    file_path: Path,
+    destination_folder: Path,
+    destination_name: str | None = None,
+) -> str:
     """Move a file to a destination folder without overwriting existing files.
 
     Args:
         file_path: Source file to move.
         destination_folder: Destination directory.
+        destination_name: Optional destination filename. When omitted, the
+            original filename is preserved.
 
     Returns:
         A status string describing the result. One of:
-        - `"missing"` if the source file does not exist.
-        - `"already_exists"` if the destination file already exists.
-        - `"moved"` if the file was successfully moved.
+        - "missing" if the source file does not exist.
+        - "already_exists" if the destination file already exists.
+        - "moved" if the file was successfully moved.
     """
     if not file_path.exists():
         return "missing"
 
     destination_folder.mkdir(parents=True, exist_ok=True)
-    destination_path = destination_folder / file_path.name
+    final_name = destination_name or file_path.name
+    destination_path = destination_folder / final_name
 
     if destination_path.exists():
         return "already_exists"
@@ -134,13 +160,162 @@ def move_file_safely(file_path: Path, destination_folder: Path) -> str:
 
 
 def initial_destination_for_source_file() -> Path:
-    """Return the initial destination for source imagery."""
+    """Return the initial destination for source imagery.
+
+    Returns:
+        The multispectral folder, which serves as the initial staging area
+        before optional thermal separation and exclusion handling.
+    """
     return multispectral_folder
 
 
+def iter_set_folders() -> list[Path]:
+    """Return SET folders under the raw root sorted by numeric prefix.
+
+    Expected SET folder names follow the pattern `####SET`, such as
+    `0001SET` or `0002SET`.
+
+    Returns:
+        A list of SET folder paths sorted by their numeric prefix.
+
+    Raises:
+        FileNotFoundError: If the raw imagery root does not exist.
+    """
+    if not ROOT_FOLDER.exists():
+        raise FileNotFoundError(f"Raw imagery directory does not exist: {ROOT_FOLDER}")
+
+    set_folders: list[tuple[int, Path]] = []
+    for path in ROOT_FOLDER.iterdir():
+        if not path.is_dir():
+            continue
+        match = SET_FOLDER_RE.match(path.name)
+        if not match:
+            continue
+        set_number = int(match.group(1))
+        set_folders.append((set_number, path))
+
+    set_folders.sort(key=lambda item: item[0])
+    return [path for _, path in set_folders]
+
+
+def iter_source_files(root: Path) -> Generator[Path, None, None]:
+    """Yield source files recursively from a root folder.
+
+    Args:
+        root: Folder to scan recursively.
+
+    Yields:
+        File paths for all files found beneath the provided root folder.
+    """
+    for file_path in sorted(root.rglob("*")):
+        if file_path.is_file():
+            yield file_path
+
+
+def move_source_files_to_new_folder() -> dict[str, int]:
+    """Move source files into the new folder structure.
+
+    When combining imagery from multiple SET folders, this function processes
+    SET folders in ascending numeric order and renumbers capture IDs in later
+    SET folders so destination filenames remain unique and continuous.
+
+    Returns:
+        A dictionary of summary counts for moved, skipped, missing,
+        already-existing, and renumbered files.
+    """
+    counts: dict[str, int] = {
+        "initial_multispectral": 0,
+        "skipped_name": 0,
+        "missing": 0,
+        "already_exists": 0,
+        "renamed_with_offset": 0,
+        "set_folders_processed": 0,
+    }
+
+    destination_folder = initial_destination_for_source_file()
+    capture_offset = 0
+
+    set_folders = iter_set_folders()
+
+    if set_folders:
+        for set_folder in set_folders:
+            counts["set_folders_processed"] += 1
+            files_in_set = list(iter_source_files(set_folder))
+
+            parsed_files: list[tuple[Path, int, int]] = []
+            max_capture_id_in_set = -1
+
+            for file_path in files_in_set:
+                parsed = parse_filename(file_path)
+                if parsed is None:
+                    counts["skipped_name"] += 1
+                    print(f"Skipping unrecognized filename: {file_path}")
+                    continue
+
+                capture_id, band_id = parsed
+                parsed_files.append((file_path, capture_id, band_id))
+                max_capture_id_in_set = max(max_capture_id_in_set, capture_id)
+
+            print(
+                f"Processing SET folder {set_folder.name} with capture offset {capture_offset}"
+            )
+
+            for file_path, capture_id, band_id in parsed_files:
+                adjusted_capture_id = capture_id + capture_offset
+                destination_name = format_output_name(
+                    file_path=file_path,
+                    capture_id=adjusted_capture_id,
+                    band_id=band_id,
+                )
+                result = move_file_safely(
+                    file_path,
+                    destination_folder,
+                    destination_name=destination_name,
+                )
+
+                if result == "moved":
+                    counts["initial_multispectral"] += 1
+                    if adjusted_capture_id != capture_id:
+                        counts["renamed_with_offset"] += 1
+                else:
+                    counts[result] += 1
+                    print(f"{result}, skipped: {file_path}")
+
+            if COMBINE_IMAGERY and max_capture_id_in_set >= 0:
+                capture_offset += max_capture_id_in_set + 1
+    else:
+        print("No SET folders found; scanning raw root recursively.")
+        for file_path in iter_source_files(ROOT_FOLDER):
+            parsed = parse_filename(file_path)
+            if parsed is None:
+                counts["skipped_name"] += 1
+                print(f"Skipping unrecognized filename: {file_path}")
+                continue
+
+            capture_id, band_id = parsed
+            destination_name = format_output_name(file_path, capture_id, band_id)
+            result = move_file_safely(
+                file_path,
+                destination_folder,
+                destination_name=destination_name,
+            )
+
+            if result == "moved":
+                counts["initial_multispectral"] += 1
+            else:
+                counts[result] += 1
+                print(f"{result}, skipped: {file_path}")
+
+    return counts
+
+
 def separate_thermal_images() -> dict[str, int]:
-    """Move thermal-band images from multispectral to thermal."""
-    counts = {
+    """Move thermal-band images from multispectral to thermal.
+
+    Returns:
+        A dictionary summarizing how many files were moved or skipped.
+    """
+    counts: dict[str, int] = {
         "moved_to_thermal": 0,
         "skipped_name": 0,
         "missing": 0,
@@ -154,6 +329,7 @@ def separate_thermal_images() -> dict[str, int]:
         parsed = parse_filename(file_path)
         if parsed is None:
             counts["skipped_name"] += 1
+            print(f"Skipping unrecognized filename in multispectral folder: {file_path}")
             continue
 
         _, band_id = parsed
@@ -165,64 +341,6 @@ def separate_thermal_images() -> dict[str, int]:
             counts["moved_to_thermal"] += 1
         else:
             counts[result] += 1
-
-    return counts
-
-
-def iter_source_files() -> Generator[Path, None, None]:
-    """Yield source files from the raw imagery root.
-
-    This search is recursive so imagery can be discovered in nested
-    subfolders under the configured raw root.
-
-    Yields:
-        File paths for all files found beneath the raw imagery root.
-    """
-    if not ROOT_FOLDER.exists():
-        raise FileNotFoundError(f"Raw imagery directory does not exist: {ROOT_FOLDER}")
-
-    for file_path in sorted(ROOT_FOLDER.rglob("*")):
-        if file_path.is_file():
-            yield file_path
-
-
-def move_source_files_to_new_folder() -> dict[str, int]:
-    """Move source files into the new folder structure.
-
-    The function scans files under `ROOT_FOLDER`, parses filenames, chooses
-    a destination folder based on configuration and band ID, and moves files
-    while tracking summary counts.
-
-    Returns:
-        A dictionary of summary counts for moved, skipped, missing, and
-        already-existing files.
-    """
-    counts: dict[str, int] = {
-        "initial_multispectral": 0,
-        "initial_thermal": 0,
-        "skipped_name": 0,
-        "missing": 0,
-        "already_exists": 0,
-    }
-
-    for file_path in iter_source_files():
-        parsed = parse_filename(file_path)
-        if parsed is None:
-            counts["skipped_name"] += 1
-            print(f"Skipping unrecognized filename: {file_path}")
-            continue
-
-        _, band_id = parsed
-        destination_folder = initial_destination_for_source_file(band_id)
-        result = move_file_safely(file_path, destination_folder)
-
-        if result == "moved":
-            if destination_folder == thermal_folder:
-                counts["initial_thermal"] += 1
-            else:
-                counts["initial_multispectral"] += 1
-        else:
-            counts[result] += 1
             print(f"{result}, skipped: {file_path}")
 
     return counts
@@ -231,17 +349,12 @@ def move_source_files_to_new_folder() -> dict[str, int]:
 def files_to_review_in_new_folder() -> Generator[Path, None, None]:
     """Yield files in destination folders that should be checked for exclusion.
 
-    The folders reviewed depend on the imagery organization settings. When
-    imagery is combined, only the multispectral folder is reviewed. When
-    thermal imagery is separated, both multispectral and thermal folders are
-    reviewed.
-
     Yields:
         File paths from the destination folders that should be checked for
         calibration panel or exclusion handling.
     """
     folders = [multispectral_folder]
-    if not COMBINE_IMAGERY and SEPARATE_THERMAL:
+    if SEPARATE_THERMAL:
         folders.append(thermal_folder)
 
     for folder in folders:
@@ -305,8 +418,9 @@ def main() -> None:
     """Run the imagery organization workflow.
 
     This creates the destination folder structure, performs the initial file
-    move, optionally separates thermal, applies exclusions and calibration panel separation,
-    and prints summary counts for each processing step.
+    move, optionally separates thermal imagery, optionally applies
+    calibration panel and exclusion handling, and prints summary counts for
+    each processing step.
 
     Returns:
         None.
@@ -332,6 +446,23 @@ def main() -> None:
         step3_counts = apply_exclusions_and_cal_panels()
     else:
         print("\nStep 3 skipped because RUN_EXCLUSIONS = False")
+
+    print("\nDone.\n")
+
+    print("Initial move summary:")
+    for key, value in step1_counts.items():
+        print(f"{key}: {value}")
+
+    if SEPARATE_THERMAL:
+        print("\nThermal separation summary:")
+        for key, value in thermal_counts.items():
+            print(f"{key}: {value}")
+
+    if RUN_EXCLUSIONS:
+        print("\nExclusion/panel summary:")
+        for key, value in step3_counts.items():
+            print(f"{key}: {value}")
+
 
 if __name__ == "__main__":
     main()
