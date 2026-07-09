@@ -20,6 +20,11 @@ exclude_ranges = [
     [1374, 1399]
 ]
 
+[range]
+enabled = true
+start = 962      # inclusive
+end = 1373     # inclusive
+
 [naming]
 # Regex for input images (raw/multispectral)
 source_pattern = "^IMG_(\\d+)_(\\d+)\\.tif$"

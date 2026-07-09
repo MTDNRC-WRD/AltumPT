@@ -16,13 +16,15 @@ from datetime import datetime
 from typing import Any, Callable
 import re
 import subprocess
+import gc
 
 import imageio.v3 as iio
 import numpy as np
 from numpy.typing import NDArray
 from tqdm import tqdm
+import imageio.v3 as iio
 
-from micasense import imageset, panel
+from micasense import imageset, imageutils, panel
 
 from config_loader import load_config, date_config
 
@@ -39,6 +41,13 @@ DATE_KEY = "20260430"  # Change per flight/date as needed.
 cfg = load_config()
 date_cfg = date_config(cfg, DATE_KEY)
 naming_cfg = cfg["naming"]
+range_cfg = cfg.get("range", {})
+
+RANGE_ENABLED = range_cfg.get("enabled", False)
+RANGE_START = int(range_cfg.get("start", 0))
+RANGE_END = range_cfg.get("end", None)
+if RANGE_END is not None:
+    RANGE_END = int(RANGE_END)
 
 IMAGERY_ROOT = Path(date_cfg["imagery_root"])
 multispectral_folder = IMAGERY_ROOT / "multispectral"
@@ -146,10 +155,10 @@ def load_panel_captures(panel_dir: Path) -> list[tuple[Any, panel.Panel]]:
 
     panel_list: list[tuple[Any, panel.Panel]] = []
     for cap in captures:
+        # Use one representative image per capture (e.g., first band)
         img = cap.images[0]
-        panel_obj = panel.Panel(img)
-        panel_list.append((cap, panel_obj))
-
+        p = panel.Panel(img)
+        panel_list.append((cap, p))
     return panel_list
 
 
@@ -169,9 +178,9 @@ def compute_k_for_panel(panel_obj: panel.Panel) -> CalibrationDict:
         ValueError: If panel reflectance cannot be determined from the panel
             serial information.
     """
-    rad_mean, _, _, _ = panel_obj.radiance()
+    rad_mean, _, _, _ = p.radiance()
 
-    rho = panel_obj.reflectance_from_panel_serial()
+    rho = p.reflectance_from_panel_serial()
     if rho is None:
         raise ValueError("Panel reflectance could not be determined from serial.")
 
@@ -326,26 +335,12 @@ def load_multispectral_images(ms_dir: Path) -> Any:
     return imgset
 
 
-def process_capture_to_reflectance(cap: Any, get_k_for_time: CalibrationFunc) -> None:
-    """Convert one capture's non-thermal bands to reflectance GeoTIFFs.
+import imageio.v3 as iio  # put this with your imports at the top
 
-    Each non-thermal image in the capture is converted from radiance to
-    reflectance using the calibration factor returned for the capture time.
-    Output TIFF files are written to the reflectance folder, and EXIF/XMP
-    metadata is copied from the original source file.
-
-    Args:
-        cap: A MicaSense capture object containing one image per band.
-        get_k_for_time: Callable that returns per-band calibration factors for
-            a given capture time.
-
-    Returns:
-        None.
-
-    Raises:
-        ValueError: If a source filename cannot be parsed into capture and
-            band identifiers.
-        subprocess.CalledProcessError: If metadata copying via ExifTool fails.
+def process_capture_to_reflectance(cap, get_k_for_time):
+    """
+    Convert all non-thermal bands for a single capture to reflectance and write
+    ref_IMG_<capture>_<band>.tif to reflectance_folder, copying metadata from original.
     """
     capture_time = cap.utc_time()
     k_dict = get_k_for_time(capture_time)
@@ -373,8 +368,13 @@ def process_capture_to_reflectance(cap: Any, get_k_for_time: CalibrationFunc) ->
         out_path = make_reflectance_path(capture_id, band_id)
         out_path.parent.mkdir(parents=True, exist_ok=True)
 
+        # Write reflectance as float32 GeoTIFF (no metadata yet)
+        # imageio will create a simple single-band TIFF; copy_metadata will add EXIF/XMP afterwards.
         iio.imwrite(out_path, refl.astype(np.float32), extension=".tif")
         copy_metadata(src_path, out_path)
+
+        # Help GC by dropping big arrays
+        del rad, refl
 
 
 def main() -> None:
@@ -413,9 +413,38 @@ def main() -> None:
             print(f"    {band_name}: k = {factor:.6f}")
 
     imgset = load_multispectral_images(multispectral_folder)
+    captures = imgset.captures
+    n_total = len(captures)
+    print(f"Total captures: {n_total}")
 
+    # Helper to get capture_id from a Capture
+    def capture_id_of(cap):
+        first_path = Path(cap.images[0].path)
+        parsed = parse_capture_band(first_path)
+        if parsed is None:
+            raise ValueError(f"Cannot parse capture/band from filename: {first_path.name}")
+        capture_id, _ = parsed
+        return capture_id
+
+    # Apply optional range restriction by capture_id
+    if RANGE_ENABLED:
+        start_id = RANGE_START
+        end_id = RANGE_END if RANGE_END is not None else start_id
+
+        captures_to_process = [
+            cap for cap in captures
+            if start_id <= capture_id_of(cap) <= end_id
+        ]
+
+        print(f"\nProcessing capture IDs in [{start_id}, {end_id}] "
+              f"({len(captures_to_process)} captures selected)")
+    else:
+        captures_to_process = captures
+
+    # 3) Process each capture to reflectance with progress bar
     for cap in tqdm(imgset.captures, desc="Processing captures", unit="capture"):
         process_capture_to_reflectance(cap, k_func)
+        gc.collect()
 
     print("\nDone. Reflectance images written to:")
     print(reflectance_folder)
