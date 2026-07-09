@@ -1,18 +1,46 @@
+# Project-wide configuration for MicaSense imagery organization,
+# QA plotting, and reflectance generation.
+
 [paths]
-project_root = "C:/Users/CND367/Documents/MicaSense/Gold_Creek"
+# Full path to the ExifTool executable used for reading and copying metadata.
 exiftool = "C:/Users/CND367/Documents/python_scripts/exiftool/exiftool.exe"
 
-[dates.20260430]
+
+[folders]
+# Folder containing the raw source imagery to be organized.
 raw_root = "C:/Users/CND367/Documents/MicaSense/Gold_Creek/20260430/0000SET"
+
+# Root folder where organized imagery products will be stored.
+# Expected subfolders may include:
+# - multispectral
+# - thermal
+# - cal_panels
+# - exclusions
+# - reflectance
 imagery_root = "C:/Users/CND367/Documents/MicaSense/Gold_Creek/20260430/Imagery"
 
+
 [options]
+# If true, all imagery is initially routed into the multispectral folder.
+# If false, thermal imagery can be separated based on band ID.
 combine_imagery = true
+
+# If true, thermal imagery is separated into the thermal folder.
+# This is only relevant when combine_imagery = false.
 separate_thermal = true
+
+# If true, apply calibration panel and exclusion-range filtering after
+# the initial imagery move.
 run_exclusions = true
 
+
 [exclusions]
+# Specific capture IDs that correspond to calibration panel images.
+# These files are moved into the cal_panels folder when exclusions are run.
 calibration_panel_ids = [0, 1, 2, 1399]
+
+# Inclusive capture ID ranges to exclude from the main imagery set.
+# Each entry is [start, end].
 exclude_ranges = [
     [0, 54],
     [627, 651],
@@ -20,16 +48,30 @@ exclude_ranges = [
     [1374, 1399]
 ]
 
+
 [range]
+# Optional processing range for restricting workflows to a subset of captures.
 enabled = true
-start = 962      # inclusive
-end = 1373     # inclusive
+
+# Inclusive start capture ID.
+start = 962
+
+# Inclusive end capture ID.
+end = 1373
+
 
 [naming]
-# Regex for input images (raw/multispectral)
+# Regex pattern used to parse source image filenames.
+# Expected capture groups:
+#   1 = capture_id
+#   2 = band_id
 source_pattern = "^IMG_(\\d+)_(\\d+)\\.tif$"
-# Pattern for reflectance outputs.
-# Use Python format fields {capture_id} and {band_id}.
+
+# Naming pattern for reflectance output images.
+# Uses Python format fields:
+#   {capture_id}
+#   {band_id}
 reflectance_pattern = "ref_IMG_{capture_id}_{band_id}.tif"
-# Band used for quick QA plotting
+
+# Band ID used for quick QA plotting of image GPS positions.
 qa_band_to_plot = 1

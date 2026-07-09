@@ -13,23 +13,21 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Any
+import json
 import re
 import subprocess
-import json
 
-from tqdm import tqdm
 import matplotlib.pyplot as plt
+from tqdm import tqdm
 
-from config_loader import load_config, date_config
+from config_loader import folder_config, load_config
 
-
-DATE_KEY = "20260430"  # Change per flight/date as needed.
 
 cfg = load_config()
-date_cfg = date_config(cfg, DATE_KEY)
+folders_cfg = folder_config(cfg)
 naming_cfg = cfg["naming"]
 
-IMAGERY_ROOT = Path(date_cfg["imagery_root"])
+IMAGERY_ROOT = Path(folders_cfg["imagery_root"])
 IMAGE_FOLDER = IMAGERY_ROOT / "multispectral"
 
 EXIFTOOL_PATH = Path(cfg["paths"]["exiftool"])
@@ -61,7 +59,7 @@ def get_exiftool_metadata(image_path: Path) -> dict[str, Any]:
     """
     result = subprocess.run(
         [
-            EXIFTOOL_PATH,
+            str(EXIFTOOL_PATH),
             "-n",
             "-GPSLatitude",
             "-GPSLongitude",
@@ -95,6 +93,57 @@ def get_lat_lon(meta: dict[str, Any]) -> tuple[float | None, float | None]:
     return float(lat), float(lon)
 
 
+def parse_capture_and_band(image_path: Path) -> tuple[int, int] | None:
+    """Parse capture ID and band ID from an image filename.
+
+    Args:
+        image_path: Path to the image file whose name should be parsed.
+
+    Returns:
+        A `(capture_id, band_id)` tuple if the filename matches the configured
+        source pattern, or None if the filename does not match.
+    """
+    match = FILENAME_RE.match(image_path.name)
+    if not match:
+        return None
+
+    capture_id = int(match.group(1))
+    band_id = int(match.group(2))
+    return capture_id, band_id
+
+
+def iter_band_files() -> list[tuple[Path, int]]:
+    """Collect files for the configured QA band from the multispectral folder.
+
+    The search is recursive so files in nested subfolders are included.
+
+    Returns:
+        A sorted list of `(image_path, capture_id)` tuples for images whose
+        band ID matches the configured QA band.
+
+    Raises:
+        FileNotFoundError: If the multispectral folder does not exist.
+    """
+    if not IMAGE_FOLDER.exists():
+        raise FileNotFoundError(f"Multispectral folder does not exist: {IMAGE_FOLDER}")
+
+    band_files: list[tuple[Path, int]] = []
+
+    for image_path in sorted(IMAGE_FOLDER.rglob("*")):
+        if not image_path.is_file():
+            continue
+
+        parsed = parse_capture_and_band(image_path)
+        if parsed is None:
+            continue
+
+        capture_id, band_id = parsed
+        if band_id == BAND_TO_PLOT:
+            band_files.append((image_path, capture_id))
+
+    return band_files
+
+
 def main() -> None:
     """Read image GPS metadata and plot capture locations for QA review.
 
@@ -114,22 +163,9 @@ def main() -> None:
     lons: list[float] = []
     capture_ids: list[int] = []
 
-    band_files: list[tuple[Path, int]] = []
+    band_files = iter_band_files()
 
-    for image_path in sorted(IMAGE_FOLDER.iterdir()):
-        if not image_path.is_file():
-            continue
-
-        match = FILENAME_RE.match(image_path.name)
-        if not match:
-            continue
-
-        capture_id = int(match.group(1))
-        band_id = int(match.group(2))
-
-        if band_id == BAND_TO_PLOT:
-            band_files.append((image_path, capture_id))
-
+    print(f"Multispectral folder: {IMAGE_FOLDER}")
     print(f"Found {len(band_files)} band {BAND_TO_PLOT} images")
 
     for image_path, capture_id in tqdm(

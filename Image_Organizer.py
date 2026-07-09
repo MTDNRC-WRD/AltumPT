@@ -1,8 +1,9 @@
 """Organize multispectral and thermal imagery into a standard folder layout.
 
-This script reads a date-specific configuration, scans source imagery folders,
-moves files into a standardized destination structure, and optionally separates
-thermal imagery, calibration panel captures, and excluded capture ranges.
+This script reads project configuration from a TOML file, scans source
+imagery folders, moves files into a standardized destination structure, and
+optionally separates thermal imagery, calibration panel captures, and
+excluded capture ranges.
 
 The workflow is:
 
@@ -22,24 +23,24 @@ from typing import Generator
 import re
 import shutil
 
-from config_loader import load_config, date_config
+from config_loader import folder_config, load_config
 
-
-DATE_KEY = "20260430"  # Change per flight/date as needed.
 
 cfg = load_config()
-date_cfg = date_config(cfg, DATE_KEY)
+folders_cfg = folder_config(cfg)
 naming_cfg = cfg["naming"]
 
-ROOT_FOLDER = Path(date_cfg["raw_root"])
-NEW_FOLDER = Path(date_cfg["imagery_root"])
+ROOT_FOLDER = Path(folders_cfg["raw_root"])
+NEW_FOLDER = Path(folders_cfg["imagery_root"])
 
 COMBINE_IMAGERY: bool = cfg["options"]["combine_imagery"]
 SEPARATE_THERMAL: bool = cfg["options"]["separate_thermal"]
 RUN_EXCLUSIONS: bool = cfg["options"]["run_exclusions"]
 
 CALIBRATION_PANEL_IDS: set[int] = set(cfg["exclusions"]["calibration_panel_ids"])
-EXCLUDE_RANGES: list[tuple[int, int]] = [tuple(r) for r in cfg["exclusions"]["exclude_ranges"]]
+EXCLUDE_RANGES: list[tuple[int, int]] = [
+    tuple(item) for item in cfg["exclusions"]["exclude_ranges"]
+]
 
 multispectral_folder = NEW_FOLDER / "multispectral"
 thermal_folder = NEW_FOLDER / "thermal"
@@ -48,6 +49,8 @@ exclusion_folder = NEW_FOLDER / "exclusions"
 
 SOURCE_PATTERN: str = naming_cfg["source_pattern"]
 FILENAME_RE = re.compile(SOURCE_PATTERN, re.IGNORECASE)
+
+THERMAL_BAND_ID = 7
 
 
 def in_ranges(value: int, ranges: list[tuple[int, int]]) -> bool:
@@ -98,6 +101,7 @@ def parse_filename(file_path: Path) -> tuple[int, int] | None:
     match = FILENAME_RE.match(file_path.name)
     if not match:
         return None
+
     capture_id = int(match.group(1))
     band_id = int(match.group(2))
     return capture_id, band_id
@@ -129,31 +133,65 @@ def move_file_safely(file_path: Path, destination_folder: Path) -> str:
     return "moved"
 
 
-def initial_destination_for_source_file(band_id: int) -> Path:
-    """Determine the initial destination folder for a source image file.
-
-    Args:
-        band_id: Band ID parsed from the filename.
-
-    Returns:
-        The destination folder path for the file. If imagery is combined,
-        all files go to the multispectral folder. If thermal separation is
-        enabled and `band_id == 7`, the file goes to the thermal folder.
-        Otherwise, the file goes to the multispectral folder.
-    """
-    if COMBINE_IMAGERY:
-        return multispectral_folder
-    if SEPARATE_THERMAL and band_id == 7:
-        return thermal_folder
+def initial_destination_for_source_file() -> Path:
+    """Return the initial destination for source imagery."""
     return multispectral_folder
 
 
-def move_source_files_to_new_folder() -> dict[str, int]:
-    """Move source files from numeric subfolders into the new folder structure.
+def separate_thermal_images() -> dict[str, int]:
+    """Move thermal-band images from multispectral to thermal."""
+    counts = {
+        "moved_to_thermal": 0,
+        "skipped_name": 0,
+        "missing": 0,
+        "already_exists": 0,
+    }
 
-    The function scans subdirectories under `ROOT_FOLDER`, parses filenames,
-    chooses a destination folder based on configuration and band ID, and
-    moves files while tracking summary counts.
+    for file_path in sorted(multispectral_folder.iterdir()):
+        if not file_path.is_file():
+            continue
+
+        parsed = parse_filename(file_path)
+        if parsed is None:
+            counts["skipped_name"] += 1
+            continue
+
+        _, band_id = parsed
+        if band_id != THERMAL_BAND_ID:
+            continue
+
+        result = move_file_safely(file_path, thermal_folder)
+        if result == "moved":
+            counts["moved_to_thermal"] += 1
+        else:
+            counts[result] += 1
+
+    return counts
+
+
+def iter_source_files() -> Generator[Path, None, None]:
+    """Yield source files from the raw imagery root.
+
+    This search is recursive so imagery can be discovered in nested
+    subfolders under the configured raw root.
+
+    Yields:
+        File paths for all files found beneath the raw imagery root.
+    """
+    if not ROOT_FOLDER.exists():
+        raise FileNotFoundError(f"Raw imagery directory does not exist: {ROOT_FOLDER}")
+
+    for file_path in sorted(ROOT_FOLDER.rglob("*")):
+        if file_path.is_file():
+            yield file_path
+
+
+def move_source_files_to_new_folder() -> dict[str, int]:
+    """Move source files into the new folder structure.
+
+    The function scans files under `ROOT_FOLDER`, parses filenames, chooses
+    a destination folder based on configuration and band ID, and moves files
+    while tracking summary counts.
 
     Returns:
         A dictionary of summary counts for moved, skipped, missing, and
@@ -167,32 +205,25 @@ def move_source_files_to_new_folder() -> dict[str, int]:
         "already_exists": 0,
     }
 
-    for subfolder in sorted(ROOT_FOLDER.iterdir()):
-        if not subfolder.is_dir() or not subfolder.name.isdigit():
+    for file_path in iter_source_files():
+        parsed = parse_filename(file_path)
+        if parsed is None:
+            counts["skipped_name"] += 1
+            print(f"Skipping unrecognized filename: {file_path}")
             continue
 
-        for file_path in sorted(subfolder.iterdir()):
-            if not file_path.is_file():
-                continue
+        _, band_id = parsed
+        destination_folder = initial_destination_for_source_file(band_id)
+        result = move_file_safely(file_path, destination_folder)
 
-            parsed = parse_filename(file_path)
-            if parsed is None:
-                counts["skipped_name"] += 1
-                print(f"Skipping unrecognized filename: {file_path}")
-                continue
-
-            _, band_id = parsed
-            destination_folder = initial_destination_for_source_file(band_id)
-            result = move_file_safely(file_path, destination_folder)
-
-            if result == "moved":
-                if destination_folder == thermal_folder:
-                    counts["initial_thermal"] += 1
-                else:
-                    counts["initial_multispectral"] += 1
+        if result == "moved":
+            if destination_folder == thermal_folder:
+                counts["initial_thermal"] += 1
             else:
-                counts[result] += 1
-                print(f"{result}, skipped: {file_path}")
+                counts["initial_multispectral"] += 1
+        else:
+            counts[result] += 1
+            print(f"{result}, skipped: {file_path}")
 
     return counts
 
@@ -274,7 +305,7 @@ def main() -> None:
     """Run the imagery organization workflow.
 
     This creates the destination folder structure, performs the initial file
-    move, optionally applies exclusions and calibration panel separation,
+    move, optionally separates thermal, applies exclusions and calibration panel separation,
     and prints summary counts for each processing step.
 
     Returns:
@@ -282,27 +313,25 @@ def main() -> None:
     """
     ensure_folders()
 
-    print("Step 1: Moving source files into the new folder structure...")
+    print(f"Raw imagery root: {ROOT_FOLDER}")
+    print(f"Organized imagery root: {NEW_FOLDER}")
+
+    print("\nStep 1: Moving source files into the new folder structure...")
     step1_counts = move_source_files_to_new_folder()
 
-    step2_counts: dict[str, int] = {}
-    if RUN_EXCLUSIONS:
-        print("\nStep 2: Removing calibration panels and excluded capture ranges...")
-        step2_counts = apply_exclusions_and_cal_panels()
+    thermal_counts: dict[str, int] = {}
+    if SEPARATE_THERMAL:
+        print("\nStep 2: Separating thermal imagery...")
+        thermal_counts = separate_thermal_images()
     else:
-        print("\nStep 2 skipped because RUN_EXCLUSIONS = False")
+        print("\nStep 2 skipped because SEPARATE_THERMAL = False")
 
-    print("\nDone.\n")
-
-    print("Initial move summary:")
-    for key, value in step1_counts.items():
-        print(f"{key}: {value}")
-
+    step3_counts: dict[str, int] = {}
     if RUN_EXCLUSIONS:
-        print("\nExclusion/panel summary:")
-        for key, value in step2_counts.items():
-            print(f"{key}: {value}")
-
+        print("\nStep 3: Removing calibration panels and excluded capture ranges...")
+        step3_counts = apply_exclusions_and_cal_panels()
+    else:
+        print("\nStep 3 skipped because RUN_EXCLUSIONS = False")
 
 if __name__ == "__main__":
     main()
