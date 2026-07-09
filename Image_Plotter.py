@@ -1,6 +1,18 @@
+"""Plot QA GPS locations for a selected multispectral band.
+
+This script scans a multispectral imagery folder, selects files matching a
+configured band ID, extracts GPS metadata using ExifTool, and plots the image
+locations in capture order using Matplotlib.
+
+Each plotted point is colored by capture ID, connected by a thin line in
+capture order, and labeled with its capture ID for visual QA of image
+positioning and sequencing.
+"""
+
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 import re
 import subprocess
 import json
@@ -10,7 +22,8 @@ import matplotlib.pyplot as plt
 
 from config_loader import load_config, date_config
 
-DATE_KEY = "20260430"  # change per flight/date as needed
+
+DATE_KEY = "20260430"  # Change per flight/date as needed.
 
 cfg = load_config()
 date_cfg = date_config(cfg, DATE_KEY)
@@ -20,15 +33,32 @@ IMAGERY_ROOT = Path(date_cfg["imagery_root"])
 IMAGE_FOLDER = IMAGERY_ROOT / "multispectral"
 
 EXIFTOOL_PATH = Path(cfg["paths"]["exiftool"])
-BAND_TO_PLOT = naming_cfg["qa_band_to_plot"]
-POINT_SIZE = 18
-CMAP = "viridis"
+BAND_TO_PLOT: int = naming_cfg["qa_band_to_plot"]
+POINT_SIZE: int = 18
+CMAP: str = "viridis"
 
-SOURCE_PATTERN = naming_cfg["source_pattern"]
+SOURCE_PATTERN: str = naming_cfg["source_pattern"]
 FILENAME_RE = re.compile(SOURCE_PATTERN, re.IGNORECASE)
 
 
-def get_exiftool_metadata(image_path: Path) -> dict:
+def get_exiftool_metadata(image_path: Path) -> dict[str, Any]:
+    """Extract selected GPS metadata from an image using ExifTool.
+
+    The function calls ExifTool with numeric output enabled and requests
+    latitude and longitude in JSON format.
+
+    Args:
+        image_path: Path to the image file to inspect.
+
+    Returns:
+        A metadata dictionary for the image. The dictionary may include
+        `GPSLatitude` and `GPSLongitude` keys if GPS metadata is present.
+
+    Raises:
+        subprocess.CalledProcessError: If ExifTool returns a non-zero exit code.
+        json.JSONDecodeError: If ExifTool output cannot be parsed as JSON.
+        IndexError: If the JSON output is empty.
+    """
     result = subprocess.run(
         [
             EXIFTOOL_PATH,
@@ -46,7 +76,16 @@ def get_exiftool_metadata(image_path: Path) -> dict:
     return data[0]
 
 
-def get_lat_lon(meta: dict):
+def get_lat_lon(meta: dict[str, Any]) -> tuple[float | None, float | None]:
+    """Extract latitude and longitude from an ExifTool metadata dictionary.
+
+    Args:
+        meta: Metadata dictionary returned by ExifTool.
+
+    Returns:
+        A `(latitude, longitude)` tuple. If either GPS value is missing,
+        the function returns `(None, None)`.
+    """
     lat = meta.get("GPSLatitude")
     lon = meta.get("GPSLongitude")
 
@@ -56,13 +95,26 @@ def get_lat_lon(meta: dict):
     return float(lat), float(lon)
 
 
-def main():
-    image_paths = []
-    lats = []
-    lons = []
-    capture_ids = []
+def main() -> None:
+    """Read image GPS metadata and plot capture locations for QA review.
 
-    band_files = []
+    The script filters imagery to the configured band, reads GPS metadata
+    with ExifTool, and creates a scatter plot with a color ramp by capture
+    ID. Points are connected in capture order and labeled with capture IDs
+    to help verify image sequencing and spatial continuity.
+
+    Returns:
+        None.
+
+    Raises:
+        RuntimeError: If no GPS-enabled images are found for the selected band.
+    """
+    image_paths: list[Path] = []
+    lats: list[float] = []
+    lons: list[float] = []
+    capture_ids: list[int] = []
+
+    band_files: list[tuple[Path, int]] = []
 
     for image_path in sorted(IMAGE_FOLDER.iterdir()):
         if not image_path.is_file():
@@ -84,13 +136,13 @@ def main():
         band_files,
         total=len(band_files),
         desc="Reading GPS metadata",
-        unit="image"
+        unit="image",
     ):
         try:
             meta = get_exiftool_metadata(image_path)
             lat, lon = get_lat_lon(meta)
-        except Exception as e:
-            print(f"Failed to read metadata for {image_path.name}: {e}")
+        except Exception as exc:
+            print(f"Failed to read metadata for {image_path.name}: {exc}")
             continue
 
         if lat is None or lon is None:
@@ -103,33 +155,30 @@ def main():
         capture_ids.append(capture_id)
 
     if not lats:
-        raise RuntimeError("No GPS-enabled band 1 images found.")
+        raise RuntimeError(f"No GPS-enabled band {BAND_TO_PLOT} images found.")
 
     fig, ax = plt.subplots(figsize=(10, 8))
 
-    # thin connecting line in capture order
     ax.plot(
         lons,
         lats,
         color="gray",
         linewidth=0.6,
         alpha=0.7,
-        zorder=1
+        zorder=1,
     )
 
-    # larger scatter points with color ramp by capture ID
     sc = ax.scatter(
         lons,
         lats,
         c=capture_ids,
         cmap=CMAP,
-        s=36,
+        s=POINT_SIZE * 2,
         edgecolors="black",
         linewidths=0.25,
-        zorder=2
+        zorder=2,
     )
 
-    # small labels next to each point
     for lon, lat, capture_id in zip(lons, lats, capture_ids):
         ax.annotate(
             str(capture_id),
@@ -139,13 +188,13 @@ def main():
             fontsize=6,
             color="black",
             alpha=0.85,
-            zorder=3
+            zorder=3,
         )
 
     cbar = plt.colorbar(sc, ax=ax)
     cbar.set_label("Capture ID")
 
-    ax.set_title("Band 1 GPS Locations")
+    ax.set_title(f"Band {BAND_TO_PLOT} GPS Locations")
     ax.set_xlabel("Longitude")
     ax.set_ylabel("Latitude")
     ax.set_aspect("equal")
@@ -153,6 +202,7 @@ def main():
 
     plt.tight_layout()
     plt.show()
+
 
 if __name__ == "__main__":
     main()
