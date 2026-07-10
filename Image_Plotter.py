@@ -118,8 +118,8 @@ def iter_band_files() -> list[tuple[Path, int]]:
     The search is recursive so files in nested subfolders are included.
 
     Returns:
-        A sorted list of `(image_path, capture_id)` tuples for images whose
-        band ID matches the configured QA band.
+        A list of `(image_path, capture_id)` tuples for images whose band ID
+        matches the configured QA band, sorted by numeric capture ID.
 
     Raises:
         FileNotFoundError: If the multispectral folder does not exist.
@@ -129,7 +129,7 @@ def iter_band_files() -> list[tuple[Path, int]]:
 
     band_files: list[tuple[Path, int]] = []
 
-    for image_path in sorted(IMAGE_FOLDER.rglob("*")):
+    for image_path in IMAGE_FOLDER.rglob("*"):
         if not image_path.is_file():
             continue
 
@@ -141,6 +141,7 @@ def iter_band_files() -> list[tuple[Path, int]]:
         if band_id == BAND_TO_PLOT:
             band_files.append((image_path, capture_id))
 
+    band_files.sort(key=lambda item: item[1])
     return band_files
 
 
@@ -158,10 +159,7 @@ def main() -> None:
     Raises:
         RuntimeError: If no GPS-enabled images are found for the selected band.
     """
-    image_paths: list[Path] = []
-    lats: list[float] = []
-    lons: list[float] = []
-    capture_ids: list[int] = []
+    records: list[tuple[int, float, float, Path]] = []
 
     band_files = iter_band_files()
 
@@ -185,13 +183,17 @@ def main() -> None:
             print(f"No GPS found for {image_path.name}")
             continue
 
-        image_paths.append(image_path)
-        lats.append(lat)
-        lons.append(lon)
-        capture_ids.append(capture_id)
+        records.append((capture_id, lon, lat, image_path))
 
-    if not lats:
+    if not records:
         raise RuntimeError(f"No GPS-enabled band {BAND_TO_PLOT} images found.")
+
+    records.sort(key=lambda item: item[0])
+
+    capture_ids = [item[0] for item in records]
+    lons = [item[1] for item in records]
+    lats = [item[2] for item in records]
+    image_paths = [item[3] for item in records]
 
     fig, ax = plt.subplots(figsize=(10, 8))
 
@@ -215,7 +217,7 @@ def main() -> None:
         zorder=2,
     )
 
-    for lon, lat, capture_id in zip(lons, lats, capture_ids):
+    for capture_id, lon, lat, _image_path in records:
         ax.annotate(
             str(capture_id),
             xy=(lon, lat),
