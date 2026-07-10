@@ -58,29 +58,12 @@ THERMAL_BAND_ID = 7
 
 
 def in_ranges(value: int, ranges: list[tuple[int, int]]) -> bool:
-    """Return whether a value falls inside any inclusive integer range.
-
-    Args:
-        value: Capture ID or other integer value to test.
-        ranges: Inclusive ranges expressed as `(start, end)` tuples.
-
-    Returns:
-        True if `value` lies within at least one range in `ranges`;
-        otherwise False.
-    """
+    """Return whether a value falls inside any inclusive integer range."""
     return any(start <= value <= end for start, end in ranges)
 
 
 def ensure_folders() -> None:
-    """Create the destination folder structure if it does not exist.
-
-    This includes the top-level imagery folder and subfolders for
-    multispectral imagery, thermal imagery, calibration panels, and
-    excluded files.
-
-    Returns:
-        None.
-    """
+    """Create the destination folder structure if it does not exist."""
     NEW_FOLDER.mkdir(parents=True, exist_ok=True)
     multispectral_folder.mkdir(parents=True, exist_ok=True)
     thermal_folder.mkdir(parents=True, exist_ok=True)
@@ -89,19 +72,7 @@ def ensure_folders() -> None:
 
 
 def parse_filename(file_path: Path) -> tuple[int, int] | None:
-    """Parse capture ID and band ID from an image filename.
-
-    The filename must match the configured regular expression pattern. The
-    function assumes the first two capture groups correspond to capture ID
-    and band ID, respectively.
-
-    Args:
-        file_path: Path to the file whose name will be parsed.
-
-    Returns:
-        A `(capture_id, band_id)` tuple if the filename matches the expected
-        pattern, or None if the filename does not match.
-    """
+    """Parse capture ID and band ID from an image filename."""
     match = FILENAME_RE.match(file_path.name)
     if not match:
         return None
@@ -112,18 +83,22 @@ def parse_filename(file_path: Path) -> tuple[int, int] | None:
 
 
 def format_output_name(file_path: Path, capture_id: int, band_id: int) -> str:
-    """Create an output filename preserving the original extension.
+    """Create an output filename using the original name structure when possible."""
+    match = FILENAME_RE.match(file_path.name)
+    if not match:
+        return file_path.name
 
-    Args:
-        file_path: Original source file path.
-        capture_id: Capture ID to write into the destination filename.
-        band_id: Band ID to write into the destination filename.
+    start_1, end_1 = match.span(1)
+    start_2, end_2 = match.span(2)
 
-    Returns:
-        A renamed output filename using the adjusted capture ID and original
-        file extension.
-    """
-    return f"IMG_{capture_id}_{band_id}{file_path.suffix}"
+    new_name = (
+        file_path.name[:start_1]
+        + str(capture_id)
+        + file_path.name[end_1:start_2]
+        + str(band_id)
+        + file_path.name[end_2:]
+    )
+    return new_name
 
 
 def move_file_safely(
@@ -131,20 +106,7 @@ def move_file_safely(
     destination_folder: Path,
     destination_name: str | None = None,
 ) -> str:
-    """Move a file to a destination folder without overwriting existing files.
-
-    Args:
-        file_path: Source file to move.
-        destination_folder: Destination directory.
-        destination_name: Optional destination filename. When omitted, the
-            original filename is preserved.
-
-    Returns:
-        A status string describing the result. One of:
-        - "missing" if the source file does not exist.
-        - "already_exists" if the destination file already exists.
-        - "moved" if the file was successfully moved.
-    """
+    """Move a file to a destination folder without overwriting existing files."""
     if not file_path.exists():
         return "missing"
 
@@ -160,27 +122,12 @@ def move_file_safely(
 
 
 def initial_destination_for_source_file() -> Path:
-    """Return the initial destination for source imagery.
-
-    Returns:
-        The multispectral folder, which serves as the initial staging area
-        before optional thermal separation and exclusion handling.
-    """
+    """Return the initial destination for source imagery."""
     return multispectral_folder
 
 
 def iter_set_folders() -> list[Path]:
-    """Return SET folders under the raw root sorted by numeric prefix.
-
-    Expected SET folder names follow the pattern `####SET`, such as
-    `0001SET` or `0002SET`.
-
-    Returns:
-        A list of SET folder paths sorted by their numeric prefix.
-
-    Raises:
-        FileNotFoundError: If the raw imagery root does not exist.
-    """
+    """Return SET folders under the raw root sorted by numeric prefix."""
     if not ROOT_FOLDER.exists():
         raise FileNotFoundError(f"Raw imagery directory does not exist: {ROOT_FOLDER}")
 
@@ -199,30 +146,14 @@ def iter_set_folders() -> list[Path]:
 
 
 def iter_source_files(root: Path) -> Generator[Path, None, None]:
-    """Yield source files recursively from a root folder.
-
-    Args:
-        root: Folder to scan recursively.
-
-    Yields:
-        File paths for all files found beneath the provided root folder.
-    """
+    """Yield source files recursively from a root folder."""
     for file_path in sorted(root.rglob("*")):
         if file_path.is_file():
             yield file_path
 
 
 def move_source_files_to_new_folder() -> dict[str, int]:
-    """Move source files into the new folder structure.
-
-    When combining imagery from multiple SET folders, this function processes
-    SET folders in ascending numeric order and renumbers capture IDs in later
-    SET folders so destination filenames remain unique and continuous.
-
-    Returns:
-        A dictionary of summary counts for moved, skipped, missing,
-        already-existing, and renumbered files.
-    """
+    """Move source files into the new folder structure."""
     counts: dict[str, int] = {
         "initial_multispectral": 0,
         "skipped_name": 0,
@@ -261,12 +192,17 @@ def move_source_files_to_new_folder() -> dict[str, int]:
             )
 
             for file_path, capture_id, band_id in parsed_files:
-                adjusted_capture_id = capture_id + capture_offset
+                if COMBINE_IMAGERY:
+                    adjusted_capture_id = capture_id + capture_offset
+                else:
+                    adjusted_capture_id = capture_id
+
                 destination_name = format_output_name(
                     file_path=file_path,
                     capture_id=adjusted_capture_id,
                     band_id=band_id,
                 )
+
                 result = move_file_safely(
                     file_path,
                     destination_folder,
@@ -294,6 +230,7 @@ def move_source_files_to_new_folder() -> dict[str, int]:
 
             capture_id, band_id = parsed
             destination_name = format_output_name(file_path, capture_id, band_id)
+
             result = move_file_safely(
                 file_path,
                 destination_folder,
@@ -310,11 +247,7 @@ def move_source_files_to_new_folder() -> dict[str, int]:
 
 
 def separate_thermal_images() -> dict[str, int]:
-    """Move thermal-band images from multispectral to thermal.
-
-    Returns:
-        A dictionary summarizing how many files were moved or skipped.
-    """
+    """Move thermal-band images from multispectral to thermal."""
     counts: dict[str, int] = {
         "moved_to_thermal": 0,
         "skipped_name": 0,
@@ -347,15 +280,8 @@ def separate_thermal_images() -> dict[str, int]:
 
 
 def files_to_review_in_new_folder() -> Generator[Path, None, None]:
-    """Yield files in destination folders that should be checked for exclusion.
-
-    Yields:
-        File paths from the destination folders that should be checked for
-        calibration panel or exclusion handling.
-    """
-    folders = [multispectral_folder]
-    if SEPARATE_THERMAL:
-        folders.append(thermal_folder)
+    """Yield files in destination folders that should be checked for exclusion."""
+    folders = [multispectral_folder, thermal_folder]
 
     for folder in folders:
         if not folder.exists():
@@ -366,17 +292,7 @@ def files_to_review_in_new_folder() -> Generator[Path, None, None]:
 
 
 def apply_exclusions_and_cal_panels() -> dict[str, int]:
-    """Move calibration panel and excluded captures into dedicated folders.
-
-    Files already placed in the new folder structure are re-checked by
-    capture ID. Files matching configured calibration panel IDs are moved
-    to the calibration panel folder. Files whose capture IDs fall within
-    configured exclusion ranges are moved to the exclusions folder.
-
-    Returns:
-        A dictionary of summary counts for moved, skipped, missing, and
-        already-existing files.
-    """
+    """Move calibration panel and excluded captures into dedicated folders."""
     counts: dict[str, int] = {
         "moved_to_cal_panels": 0,
         "moved_to_exclusions": 0,
@@ -415,37 +331,28 @@ def apply_exclusions_and_cal_panels() -> dict[str, int]:
 
 
 def main() -> None:
-    """Run the imagery organization workflow.
-
-    This creates the destination folder structure, performs the initial file
-    move, optionally separates thermal imagery, optionally applies
-    calibration panel and exclusion handling, and prints summary counts for
-    each processing step.
-
-    Returns:
-        None.
-    """
+    """Run the imagery organization workflow."""
     ensure_folders()
 
     print(f"Raw imagery root: {ROOT_FOLDER}")
     print(f"Organized imagery root: {NEW_FOLDER}")
 
-    print("\nStep 1: Moving source files into the new folder structure...")
+    print("\nMoving source files into the new folder structure...")
     step1_counts = move_source_files_to_new_folder()
 
     thermal_counts: dict[str, int] = {}
     if SEPARATE_THERMAL:
-        print("\nStep 2: Separating thermal imagery...")
+        print("\nSeparating thermal imagery...")
         thermal_counts = separate_thermal_images()
     else:
-        print("\nStep 2 skipped because SEPARATE_THERMAL = False")
+        print("\nThermal separation skipped because SEPARATE_THERMAL = False")
 
     step3_counts: dict[str, int] = {}
     if RUN_EXCLUSIONS:
-        print("\nStep 3: Removing calibration panels and excluded capture ranges...")
+        print("\nRemoving calibration panels and excluded capture ranges...")
         step3_counts = apply_exclusions_and_cal_panels()
     else:
-        print("\nStep 3 skipped because RUN_EXCLUSIONS = False")
+        print("\nExclusion handling skipped because RUN_EXCLUSIONS = False")
 
     print("\nDone.\n")
 
